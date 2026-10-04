@@ -106,3 +106,4 @@ label.chk input{width:20px;height:20px;accent-color:var(--green)}
 #tabs button{flex:1;max-width:140px;height:var(--tab-h);border:none;background:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--sub);font-size:11px;font-weight:600}
 #tabs button.on{color:var(--green-d)}
 #tabs svg{width:25px;height:25px}
+#tabs[hidden]{display:none}

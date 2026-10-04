@@ -1,53 +1,48 @@
-"use strict";
-/* ペット記録アプリ: IndexedDBに端末内保存(クラウド同期なし) */
+/* ペット記録アプリ: Firebase(Firestore)で家族の端末間共有。Googleログイン+許可アカウントのみ */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCf5xUoXkyMgZtf37r7Cq7pcLsrqoc6KeM",
+  authDomain: "pet-record-67258.firebaseapp.com",
+  projectId: "pet-record-67258",
+  storageBucket: "pet-record-67258.firebasestorage.app",
+  messagingSenderId: "465696836186",
+  appId: "1:465696836186:web:3ed8a522ca3918863c6663"
+};
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const fs = initializeFirestore(fbApp, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+const petsCol = collection(fs, "pets"), recsCol = collection(fs, "records"), photosCol = collection(fs, "photos");
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const icon = (n) => `<svg><use href="#i-${n}"/></svg>`;
 const WD = ["日", "月", "火", "水", "木", "金", "土"];
 
-/* ---------- IndexedDB ---------- */
-let db;
-function openDB() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open("pet-record", 1);
-    r.onupgradeneeded = () => {
-      const d = r.result;
-      d.createObjectStore("pets", { keyPath: "id", autoIncrement: true });
-      d.createObjectStore("records", { keyPath: "id", autoIncrement: true }).createIndex("petId", "petId");
-    };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-}
-function req(store, mode, fn) {
-  return new Promise((res, rej) => {
-    const t = db.transaction(store, mode);
-    const out = fn(t.objectStore(store));
-    t.oncomplete = () => res(out && "result" in out ? out.result : undefined);
-    t.onerror = () => rej(t.error);
-    t.onabort = () => rej(t.error);
-  });
-}
-const dbAll = (s) => req(s, "readonly", (o) => o.getAll());
-const dbPut = (s, v) => req(s, "readwrite", (o) => o.put(v));
-const dbDel = (s, k) => req(s, "readwrite", (o) => o.delete(k));
-const dbClear = (s) => req(s, "readwrite", (o) => o.clear());
-
 /* ---------- 状態 ---------- */
-let pets = [], records = [];
+let pets = [], records = [], user = null, denied = false, loaded = { pets: false, records: false }, unsubs = [];
 let curPet = null, tab = "home", range = "3m", photoLimit = 30, timelineLimit = 20;
-try { curPet = Number(localStorage.getItem("curPet")) || null; tab = localStorage.getItem("tab") || "home"; } catch (e) {}
+try { curPet = localStorage.getItem("curPet") || null; tab = localStorage.getItem("tab") || "home"; } catch (e) {}
 
-const petRecs = (type) => records.filter((r) => r.petId === curPet && (!type || r.type === type)).sort((a, b) => b.at - a.at || b.id - a.id);
+const byName = () => (user && (user.displayName || user.email || "")).split(/[\s@]/)[0] || "";
+const petRecs = (type) => records.filter((r) => r.petId === curPet && (!type || r.type === type)).sort((a, b) => b.at - a.at || b.id.localeCompare(a.id));
 const pet = () => pets.find((p) => p.id === curPet);
+const strip = (o) => { const c = { ...o }; delete c.id; return c; };
+const fail = (e) => { console.error(e); toast("保存に失敗しました。通信を確認してください"); };
 
-async function load() {
-  pets = await dbAll("pets");
-  records = await dbAll("records");
+function syncCurPet() {
   if (!pets.find((p) => p.id === curPet)) curPet = pets[0] ? pets[0].id : null;
   try { localStorage.setItem("curPet", curPet || ""); } catch (e) {}
 }
+function startSync() {
+  stopSync(); denied = false; loaded = { pets: false, records: false };
+  const onErr = (e) => { if (e.code === "permission-denied") { denied = true; render(); } else console.error(e); };
+  unsubs.push(onSnapshot(petsCol, (snap) => { pets = snap.docs.map((d) => ({ ...d.data(), id: d.id })).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); loaded.pets = true; syncCurPet(); render(); }, onErr));
+  unsubs.push(onSnapshot(recsCol, (snap) => { records = snap.docs.map((d) => ({ ...d.data(), id: d.id })); loaded.records = true; render(); }, onErr));
+}
+function stopSync() { unsubs.forEach((u) => u()); unsubs = []; pets = []; records = []; }
 
 /* ---------- 日付ユーティリティ(記録日時は自動入力) ---------- */
 const pad = (n) => String(n).padStart(2, "0");
@@ -119,6 +114,12 @@ async function resize(file, max, q) {
   c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", q);
 }
+async function resizeSafe(file) {
+  let out = await resize(file, 1280, 0.82);
+  if (out.length > 900000) out = await resize(file, 1000, 0.7);
+  if (out.length > 900000) out = await resize(file, 800, 0.6);
+  return out;
+}
 async function squareThumb(file, size) {
   const img = await loadImage(file);
   const s = Math.min(img.naturalWidth, img.naturalHeight);
@@ -133,7 +134,7 @@ function renderPetBar() {
     pets.map((p) => `<button class="chip ${p.id === curPet ? "on" : ""}" data-pet="${p.id}">${avatar(p, "")}${esc(p.name)}</button>`).join("") +
     `<button class="chip add" id="addPet">${icon("plus")}ペット追加</button>`;
   $("#petBar").querySelectorAll("[data-pet]").forEach((b) => (b.onclick = () => {
-    curPet = Number(b.dataset.pet); photoLimit = 30; timelineLimit = 20;
+    curPet = b.dataset.pet; photoLimit = 30; timelineLimit = 20;
     try { localStorage.setItem("curPet", curPet); } catch (e) {}
     render();
   }));
@@ -142,26 +143,49 @@ function renderPetBar() {
 
 /* ---------- 画面描画 ---------- */
 function render() {
+  if (!user) { $("#petBar").innerHTML = ""; $("#tabs").hidden = true; $("#view").innerHTML = loginView(); const b = $("#loginBtn"); if (b) b.onclick = login; return; }
+  $("#tabs").hidden = false;
+  if (denied) { $("#petBar").innerHTML = ""; $("#tabs").hidden = true; $("#view").innerHTML = deniedView(); $("#outBtn").onclick = () => signOut(auth); return; }
+  if (!loaded.pets || !loaded.records) { $("#petBar").innerHTML = ""; $("#view").innerHTML = `<div class="empty"><p>読み込み中...</p></div>`; return; }
   renderPetBar();
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   const v = $("#view");
   if (!pets.length) { v.innerHTML = welcome(); $("#startBtn").onclick = () => petForm(); return; }
   ({ home: viewHome, weight: viewWeight, photo: viewPhoto, pet: viewPet }[tab])(v);
 }
+function loginView() {
+  return `<div class="empty"><img src="icons/icon-192.png" alt=""><h2>ペット記録</h2>
+    <p>家族で共有する記録アプリです。<br>許可されたGoogleアカウントでログインしてください。</p>
+    <button class="btn" id="loginBtn">Googleでログイン</button></div>`;
+}
+function deniedView() {
+  return `<div class="empty"><h2>このアカウントは許可されていません</h2>
+    <p>${esc(user.email)} は、このアプリの利用者として登録されていません。<br>別のGoogleアカウントでログインし直してください。</p>
+    <button class="btn" id="outBtn">ログアウト</button></div>`;
+}
+async function login() {
+  const prov = new GoogleAuthProvider(); prov.setCustomParameters({ prompt: "select_account" });
+  try { await signInWithPopup(auth, prov); }
+  catch (e) {
+    if (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request") return;
+    try { await signInWithRedirect(auth, prov); } catch (e2) { toast("ログインできませんでした"); }
+  }
+}
 function welcome() {
   return `<div class="empty"><img src="icons/icon-192.png" alt=""><h2>ペット記録へようこそ</h2>
     <p>体重・写真・メモを、記録した日時つきで残せます。<br>まずは家族を登録してください。</p>
     <button class="btn" id="startBtn">${icon("plus")}ペットを登録する</button>
-    <p class="hint" style="margin-top:18px">記録はこの端末の中にだけ保存されます。</p></div>`;
+    <p class="hint" style="margin-top:18px">記録は許可された家族のアカウント間で共有されます。</p></div>`;
 }
 
+const who = (r) => (r.by ? ` ・ ${esc(r.by)}` : "");
 function recordItem(r, p) {
   const unit = p.unit || "g";
   if (r.type === "weight")
-    return `<button class="item" data-rec="${r.id}"><span class="ic">${icon("scale")}</span><span class="tx"><div class="t1">${fmtW(r.value, unit)} ${unit}</div><div class="t2">${fmtTime(r.at)}${r.note ? " ・ " + esc(r.note) : ""}</div></span></button>`;
+    return `<button class="item" data-rec="${r.id}"><span class="ic">${icon("scale")}</span><span class="tx"><div class="t1">${fmtW(r.value, unit)} ${unit}</div><div class="t2">${fmtTime(r.at)}${who(r)}${r.note ? " ・ " + esc(r.note) : ""}</div></span></button>`;
   if (r.type === "photo")
-    return `<button class="item" data-rec="${r.id}"><img class="th" src="${r.thumb}" alt=""><span class="tx"><div class="t1">写真</div><div class="t2">${fmtTime(r.at)}${r.note ? " ・ " + esc(r.note) : ""}</div></span></button>`;
-  return `<button class="item" data-rec="${r.id}"><span class="ic memo">${icon("note")}</span><span class="tx"><div class="t1">メモ</div><div class="t2">${fmtTime(r.at)} ・ ${esc(r.note)}</div></span></button>`;
+    return `<button class="item" data-rec="${r.id}"><img class="th" src="${r.thumb}" alt=""><span class="tx"><div class="t1">写真</div><div class="t2">${fmtTime(r.at)}${who(r)}${r.note ? " ・ " + esc(r.note) : ""}</div></span></button>`;
+  return `<button class="item" data-rec="${r.id}"><span class="ic memo">${icon("note")}</span><span class="tx"><div class="t1">メモ</div><div class="t2">${fmtTime(r.at)}${who(r)} ・ ${esc(r.note)}</div></span></button>`;
 }
 function groupedList(list, p) {
   let last = "", out = "";
@@ -174,7 +198,7 @@ function groupedList(list, p) {
 }
 function bindRecs(root) {
   root.querySelectorAll("[data-rec]").forEach((b) => (b.onclick = () => {
-    const r = records.find((x) => x.id === Number(b.dataset.rec));
+    const r = records.find((x) => x.id === b.dataset.rec);
     r && (r.type === "photo" ? photoViewer(r.id) : recordForm(r.type, r));
   }));
 }
@@ -280,7 +304,12 @@ function viewPhoto(v) {
     ${ph.length ? `<div class="grid">${ph.slice(0, photoLimit).map((r) => `<button data-ph="${r.id}"><img src="${r.thumb}" alt="" loading="lazy"><span class="d">${fmtShort(r.at)}</span></button>`).join("")}</div>${ph.length > photoLimit ? `<button class="btn ghost block" id="morePh" style="margin-top:12px">もっと見る</button>` : ""}` : `<div class="empty"><p>まだ写真がありません</p></div>`}`;
   $("#addP").onclick = () => recordForm("photo");
   const m = $("#morePh"); if (m) m.onclick = () => { photoLimit += 60; render(); };
-  v.querySelectorAll("[data-ph]").forEach((b) => (b.onclick = () => photoViewer(Number(b.dataset.ph))));
+  v.querySelectorAll("[data-ph]").forEach((b) => (b.onclick = () => photoViewer(b.dataset.ph)));
+}
+const fullCache = new Map();
+async function loadFull(id) {
+  if (fullCache.has(id)) return fullCache.get(id);
+  try { const s = await getDoc(doc(photosCol, id)); const f = s.exists() ? s.data().full : null; if (f) fullCache.set(id, f); return f; } catch (e) { return null; }
 }
 function photoViewer(id) {
   const list = petRecs("photo");
@@ -288,11 +317,12 @@ function photoViewer(id) {
   if (i < 0) return;
   const show = () => {
     const r = list[i];
-    openSheet(fmtFull(r.at), `<div class="viewer"><img src="${r.full}" alt="">
+    openSheet(fmtFull(r.at), `<div class="viewer"><img id="bigImg" src="${r.thumb}" style="filter:blur(2px)" alt="">
       ${r.note ? `<p style="margin:0 0 10px">${esc(r.note).replace(/\n/g, "<br>")}</p>` : ""}
       <div class="nav"><button class="btn ghost sm" id="pv" ${i >= list.length - 1 ? "disabled" : ""}>前(古い)</button><button class="btn ghost sm" id="nx" ${i <= 0 ? "disabled" : ""}>次(新しい)</button></div>
       <div class="row"><button class="btn ghost" id="ed" style="flex:1">${icon("edit")}日時・メモ</button><button class="btn danger" id="dl" style="flex:1">${icon("trash")}削除</button></div></div>`,
       (b) => {
+        loadFull(r.id).then((f) => { const im = $("#bigImg"); if (im && f) { im.src = f; im.style.filter = ""; } });
         $("#pv", b).onclick = () => { i++; show(); };
         $("#nx", b).onclick = () => { i--; show(); };
         $("#ed", b).onclick = () => recordForm("photo", r);
@@ -308,19 +338,26 @@ function viewPet(v) {
   const n = records.filter((r) => r.petId === p.id).length;
   v.innerHTML = `
     <div class="card hero">${avatar(p)}<div><div class="nm">${esc(p.name)}</div><div class="meta">記録 ${n}件</div></div></div>
+    <div class="card"><h2>ログイン中のアカウント</h2><p style="margin:0 0 10px">${esc(user.email)}</p><button class="btn ghost sm" id="outBtn">ログアウト</button></div>
     <div class="row" style="margin-bottom:14px"><button class="btn ghost" id="edPet" style="flex:1">${icon("edit")}プロフィール編集</button><button class="btn danger" id="delPet" style="flex:1">${icon("trash")}このペットを削除</button></div>
     <div class="card"><h2>バックアップ</h2>
-      <p class="hint" style="margin-top:0">記録はこの端末の中だけに保存され、クラウドには送られません。機種変更や念のための保管用に、ときどきファイルに書き出してください(全ペット・写真を含む)。</p>
+      <p class="hint" style="margin-top:0">記録はクラウドで家族と共有されています。念のための保管用に、ときどきファイルに書き出してください(全ペット・写真を含む)。読み込みは、いまの記録に追加されます(同じファイルを2回読み込むと重複します)。</p>
       <div class="row"><button class="btn ghost" id="exp" style="flex:1">${icon("down")}書き出す</button><button class="btn ghost" id="imp" style="flex:1">${icon("up")}読み込む</button></div>
       <input type="file" id="impFile" accept="application/json,.json" hidden>
     </div>`;
   $("#edPet").onclick = () => petForm(p);
   $("#delPet").onclick = async () => {
     if (!confirm(`「${p.name}」と、そのすべての記録(${n}件)を削除します。元に戻せません。よろしいですか?`)) return;
-    for (const r of records.filter((r) => r.petId === p.id)) await dbDel("records", r.id);
-    await dbDel("pets", p.id);
-    curPet = null; await load(); render(); toast("削除しました");
+    try {
+      const ids = records.filter((r) => r.petId === p.id).map((r) => ({ rec: r.id, photo: r.type === "photo" }));
+      const ops = [];
+      ids.forEach((x) => { ops.push(doc(recsCol, x.rec)); if (x.photo) ops.push(doc(photosCol, x.rec)); });
+      ops.push(doc(petsCol, p.id));
+      for (let k = 0; k < ops.length; k += 400) { const b = writeBatch(fs); ops.slice(k, k + 400).forEach((r) => b.delete(r)); await b.commit(); }
+      curPet = null; toast("削除しました");
+    } catch (e) { fail(e); }
   };
+  $("#outBtn").onclick = () => { if (confirm("ログアウトしますか?")) signOut(auth); };
   $("#exp").onclick = exportData;
   $("#imp").onclick = () => $("#impFile").click();
   $("#impFile").onchange = (e) => importData(e.target.files[0]);
@@ -348,10 +385,10 @@ function petForm(p) {
       $("#pSave", b).onclick = async () => {
         const name = $("#pName", b).value.trim();
         if (!name) { toast("名前を入力してください"); return; }
-        const obj = { ...(isNew ? {} : p), name, species: $("#pSpecies", b).value.trim(), birthday: $("#pBirth", b).value, adopted: $("#pAdopt", b).value, unit: $("#pUnit", b).value, photo };
-        const id = await dbPut("pets", obj);
-        if (isNew) curPet = id;
-        await load(); closeSheet(); render(); toast("保存しました");
+        const obj = { ...strip(p), name, species: $("#pSpecies", b).value.trim(), birthday: $("#pBirth", b).value, adopted: $("#pAdopt", b).value, unit: $("#pUnit", b).value, photo };
+        if (isNew) { const ref = doc(petsCol); obj.createdAt = Date.now(); curPet = ref.id; setDoc(ref, obj).catch(fail); }
+        else updateDoc(doc(petsCol, p.id), obj).catch(fail);
+        closeSheet(); toast("保存しました");
       };
     });
 }
@@ -376,7 +413,7 @@ function recordForm(type, rec) {
       $("#rFile", b).onchange = async (e) => {
         files.length = 0; $("#prev", b).innerHTML = "";
         for (const f of e.target.files) {
-          try { files.push({ full: await resize(f, 1280, 0.82), thumb: await squareThumb(f, 320), mtime: f.lastModified }); } catch (er) { toast(er.message); }
+          try { files.push({ full: await resizeSafe(f), thumb: await squareThumb(f, 320), mtime: f.lastModified }); } catch (er) { toast(er.message); }
         }
         $("#prev", b).innerHTML = files.map((f) => `<img src="${f.thumb}" alt="">`).join("");
         $("#mtWrap", b).hidden = !files.length;
@@ -388,52 +425,73 @@ function recordForm(type, rec) {
       if (type === "weight") {
         const val = parseFloat($("#rVal", b).value);
         if (!(val > 0)) { toast("体重を入力してください"); return; }
-        await dbPut("records", { ...(editing ? r : { petId: curPet, type }), at, value: val, note });
+        if (editing) updateDoc(doc(recsCol, r.id), { at, value: val, note }).catch(fail);
+        else setDoc(doc(recsCol), { petId: curPet, type, at, value: val, note, by: byName() }).catch(fail);
       } else if (type === "memo") {
         if (!note) { toast("メモを入力してください"); return; }
-        await dbPut("records", { ...(editing ? r : { petId: curPet, type }), at, note });
+        if (editing) updateDoc(doc(recsCol, r.id), { at, note }).catch(fail);
+        else setDoc(doc(recsCol), { petId: curPet, type, at, note, by: byName() }).catch(fail);
       } else if (editing) {
-        await dbPut("records", { ...r, at, note });
+        updateDoc(doc(recsCol, r.id), { at, note }).catch(fail);
       } else {
         if (!files.length) { toast("写真を選んでください"); return; }
         const useM = $("#useMtime", b).checked;
         for (const f of files) {
-          await dbPut("records", { petId: curPet, type, at: useM && f.mtime ? f.mtime : at, note, full: f.full, thumb: f.thumb });
+          const ref = doc(recsCol), bt = writeBatch(fs);
+          bt.set(ref, { petId: curPet, type, at: useM && f.mtime ? f.mtime : at, note, thumb: f.thumb, by: byName() });
+          bt.set(doc(photosCol, ref.id), { full: f.full });
+          bt.commit().catch(fail);
           at += 1; // 同時追加の順序を保つ
         }
       }
-      await load(); closeSheet(); render(); toast("記録しました");
+      closeSheet(); toast("記録しました");
     };
     const d = $("#rDel", b); if (d) d.onclick = () => delRecord(r);
   });
 }
 async function delRecord(r) {
   if (!confirm("この記録を削除します。よろしいですか?")) return;
-  await dbDel("records", r.id); await load(); closeSheet(); render(); toast("削除しました");
+  const bt = writeBatch(fs); bt.delete(doc(recsCol, r.id)); if (r.type === "photo") bt.delete(doc(photosCol, r.id));
+  bt.commit().catch(fail); fullCache.delete(r.id); closeSheet(); toast("削除しました");
 }
 
 /* ---------- バックアップ ---------- */
-function exportData() {
-  const data = JSON.stringify({ app: "pet-record", version: 1, exportedAt: Date.now(), pets, records });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
-  const d = new Date();
-  a.download = `pet-record-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  toast("書き出しました");
+async function exportData() {
+  try {
+    toast("書き出し中...");
+    const photoSnap = await getDocs(photosCol), full = {};
+    photoSnap.forEach((d) => (full[d.id] = d.data().full));
+    const recs = records.map((r) => (r.type === "photo" ? { ...r, full: full[r.id] || r.thumb } : r));
+    const data = JSON.stringify({ app: "pet-record", version: 2, exportedAt: Date.now(), pets, records: recs });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    const d = new Date();
+    a.download = `pet-record-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast("書き出しました");
+  } catch (e) { fail(e); }
 }
 async function importData(file) {
   if (!file) return;
+  let d;
   try {
-    const d = JSON.parse(await file.text());
+    d = JSON.parse(await file.text());
     if (d.app !== "pet-record" || !Array.isArray(d.pets) || !Array.isArray(d.records)) throw new Error();
-    if (!confirm(`バックアップ(ペット${d.pets.length}匹・記録${d.records.length}件)を読み込みます。\nいま端末にある記録はすべて置き換えられます。よろしいですか?`)) return;
-    await dbClear("records"); await dbClear("pets");
-    for (const p of d.pets) await dbPut("pets", p);
-    for (const r of d.records) await dbPut("records", r);
-    curPet = null; await load(); render(); toast("読み込みました");
-  } catch (e) { toast("読み込めないファイルです"); }
+  } catch (e) { toast("読み込めないファイルです"); return; }
+  if (!confirm(`バックアップ(ペット${d.pets.length}匹・記録${d.records.length}件)を、いまの記録に追加します。よろしいですか?`)) return;
+  try {
+    const map = {}, ops = [];
+    d.pets.forEach((p, k) => { const ref = doc(petsCol); map[p.id] = ref.id; ops.push([ref, { ...strip(p), createdAt: p.createdAt || Date.now() + k }]); });
+    d.records.forEach((r) => {
+      if (!(r.petId in map)) return;
+      const ref = doc(recsCol), c = strip(r); delete c.full; c.petId = map[r.petId];
+      ops.push([ref, c]);
+      if (r.type === "photo" && r.full) ops.push([doc(photosCol, ref.id), { full: r.full }]);
+    });
+    for (let k = 0; k < ops.length; k += 200) { const bt = writeBatch(fs); ops.slice(k, k + 200).forEach(([ref, v]) => bt.set(ref, v)); await bt.commit(); }
+    toast("読み込みました");
+  } catch (e) { fail(e); }
 }
 
 /* ---------- 起動 ---------- */
@@ -441,13 +499,10 @@ document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => {
   tab = b.dataset.tab; try { localStorage.setItem("tab", tab); } catch (e) {}
   window.scrollTo(0, 0); render();
 }));
-(async () => {
-  try {
-    db = await openDB();
-    await load(); render();
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
-  } catch (e) {
-    $("#view").innerHTML = `<div class="empty"><p>この環境では記録を保存できません。<br>(プライベートブラウズでは使えないことがあります)</p></div>`;
-  }
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
-})();
+onAuthStateChanged(auth, (u) => {
+  user = u;
+  if (u) startSync(); else stopSync();
+  render();
+});
+render();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});

@@ -13,8 +13,9 @@ function loadModel(url) {
   if (!cache.has(url)) cache.set(url, new Promise((res, rej) => loader.load(url, (g) => res(g.scene), undefined, rej)));
   return cache.get(url);
 }
+const GRAY_ONLY = ["rabbit", "frog"]; // 白パイド版は未作成のためグレー版を使う
 const modelUrl = (coat, costume) =>
-  new URL(costume && costume !== "none" ? `./models/costume-${costume}_chinchilla-${coat}.glb` : `./models/chinchilla-${coat}.glb`, import.meta.url).href;
+  new URL(costume && costume !== "none" ? `./models/costume-${costume}_chinchilla-${GRAY_ONLY.includes(costume) ? "gray" : coat}.glb` : `./models/chinchilla-${coat}.glb`, import.meta.url).href;
 
 export function createViewer() {
   const el = document.createElement("div");

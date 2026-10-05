@@ -209,7 +209,9 @@ const COSTUMES = [
   { id: "bear-onesie", name: "くまのきぐるみ", days: 3 },
   { id: "kimono", name: "着物", days: 7 },
   { id: "ninja", name: "忍者", days: 14 },
+  { id: "frog", name: "かえる", days: 21 },
   { id: "suit", name: "スーツ", days: 30 },
+  { id: "rabbit", name: "うさぎ", days: 45 },
   { id: "wedding", name: "ウェディング", days: 60 },
 ];
 const isChinchilla = (p) => /チンチラ|ちんちら|chinchilla/i.test(p.species || "");

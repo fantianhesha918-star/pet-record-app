@@ -40,7 +40,7 @@ function startSync() {
   stopSync(); denied = false; loaded = { pets: false, records: false };
   const onErr = (e) => { if (e.code === "permission-denied") { denied = true; render(); } else console.error(e); };
   unsubs.push(onSnapshot(petsCol, (snap) => { pets = snap.docs.map((d) => ({ ...d.data(), id: d.id })).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); loaded.pets = true; syncCurPet(); render(); }, onErr));
-  unsubs.push(onSnapshot(recsCol, (snap) => { records = snap.docs.map((d) => ({ ...d.data(), id: d.id })); loaded.records = true; render(); }, onErr));
+  unsubs.push(onSnapshot(recsCol, (snap) => { records = snap.docs.map((d) => ({ ...d.data(), id: d.id })); loaded.records = true; checkUnlock(); render(); }, onErr));
 }
 function stopSync() { unsubs.forEach((u) => u()); unsubs = []; pets = []; records = []; }
 
@@ -203,6 +203,86 @@ function bindRecs(root) {
   }));
 }
 
+/* ---- 3Dチンチラ(衣装解放・記念日・体型) ---- */
+const COSTUMES = [
+  { id: "none", name: "ふつう", days: 0 },
+  { id: "bear-onesie", name: "くまのきぐるみ", days: 3 },
+  { id: "kimono", name: "着物", days: 7 },
+  { id: "ninja", name: "忍者", days: 14 },
+  { id: "suit", name: "スーツ", days: 30 },
+  { id: "wedding", name: "ウェディング", days: 60 },
+];
+const isChinchilla = (p) => /チンチラ|ちんちら|chinchilla/i.test(p.species || "");
+const recDays = (petId) => new Set(records.filter((r) => r.petId === petId).map((r) => dayKey(r.at))).size;
+function celebrate(p) {
+  const t = new Date(), md = (s) => (s ? s.slice(5) : "");
+  const today = `${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  if (p.birthday && md(p.birthday) === today) {
+    const y = t.getFullYear() - Number(p.birthday.slice(0, 4));
+    return { costume: "bear-onesie", text: y > 0 ? `${p.name}、${y}歳のお誕生日おめでとう!` : `${p.name}、お誕生日おめでとう!` };
+  }
+  if (p.adopted && md(p.adopted) === today) {
+    const y = t.getFullYear() - Number(p.adopted.slice(0, 4));
+    return { costume: "wedding", text: y > 0 ? `${p.name}、お迎えして${y}周年!ずっと一緒だよ` : `${p.name}、うちの子になった記念日!` };
+  }
+  return null;
+}
+function bodyInfo(p) {
+  const ws = petRecs("weight");
+  if (ws.length < 3) return { scale: 1, label: "体重の記録が3回たまると、体型が体重に合わせて変わります" };
+  const avg = ws.reduce((a, r) => a + r.value, 0) / ws.length;
+  const ratio = ws[0].value / avg;
+  const scale = Math.min(1.18, Math.max(0.88, 1 + 1.5 * (ratio - 1)));
+  const lab = ratio > 1.03 ? "ふっくら" : ratio < 0.97 ? "すっきり" : "いつもどおり";
+  return { scale, label: `体型: ${lab}(これまでの平均との比較・遊びの演出です)` };
+}
+let viewerP = null;
+function getViewer() {
+  if (!viewerP) viewerP = import("./chinchilla3d.js").then((m) => m.createViewer());
+  return viewerP;
+}
+function card3d(p) {
+  if (!isChinchilla(p)) return "";
+  const days = recDays(p.id), cel = celebrate(p);
+  const cur = cel ? cel.costume : (COSTUMES.find((c) => c.id === p.costume && c.days <= days) ? p.costume : "none");
+  const chips = COSTUMES.map((c) => {
+    const ok = c.days <= days;
+    return `<button class="cchip ${c.id === cur && !cel ? "on" : ""}" data-cos="${c.id}" ${ok ? "" : "disabled"}>${esc(c.name)}${ok ? "" : `<small>あと${c.days - days}日</small>`}</button>`;
+  }).join("");
+  return `<div class="card v3dcard">
+    ${cel ? `<div class="banner">${esc(cel.text)}</div>` : ""}
+    <div id="v3dHost" class="v3dhost"></div>
+    <div class="hint" style="text-align:center;margin:6px 0 10px">指でぐるっと回せます。タップするとぴょんと跳ねます。</div>
+    <div class="hint" style="text-align:center;margin:0 0 10px">${esc(bodyInfo(p).label)}</div>
+    <h2 style="margin-top:6px">衣装(記録した日数 ${days}日)</h2>
+    <div class="costumes">${chips}</div>
+  </div>`;
+}
+async function mount3d(p) {
+  const host = $("#v3dHost");
+  if (!host) return;
+  try {
+    const v = await getViewer();
+    const h = $("#v3dHost");
+    if (!h) return;
+    h.appendChild(v.el);
+    const days = recDays(p.id), cel = celebrate(p);
+    const costume = cel ? cel.costume : (COSTUMES.find((c) => c.id === p.costume && c.days <= days) ? p.costume : "none");
+    v.setLook({ coat: p.coat || "gray", costume, scale: bodyInfo(p).scale });
+  } catch (e) { console.error(e); host.innerHTML = ""; }
+}
+let lastUnlocked = {};
+function checkUnlock() {
+  for (const p of pets) {
+    const n = COSTUMES.filter((c) => c.days <= recDays(p.id)).length;
+    if (lastUnlocked[p.id] !== undefined && n > lastUnlocked[p.id] && isChinchilla(p)) {
+      const c = COSTUMES.filter((c) => c.days <= recDays(p.id)).pop();
+      toast(`新しい衣装「${c.name}」が解放されました`);
+    }
+    lastUnlocked[p.id] = n;
+  }
+}
+
 function viewHome(v) {
   const p = pet(), unit = p.unit || "g";
   const ws = petRecs("weight");
@@ -217,6 +297,7 @@ function viewHome(v) {
   const all = petRecs();
   v.innerHTML = `
     <div class="card hero">${avatar(p)}<div><div class="nm">${esc(p.name)}</div><div class="meta">${esc(meta)}</div></div></div>
+    ${card3d(p)}
     <div class="stats" style="margin-bottom:14px">${wCard}</div>
     <div class="quick">
       <button class="qbtn" id="qW">${icon("scale")}体重</button>
@@ -225,6 +306,8 @@ function viewHome(v) {
     </div>
     <h3 class="sec">きろく</h3>
     ${all.length ? groupedList(all.slice(0, timelineLimit), p) + (all.length > timelineLimit ? `<button class="btn ghost block" id="more">もっと見る</button>` : "") : `<div class="empty"><p>まだ記録がありません。<br>上のボタンから最初の記録を残しましょう。</p></div>`}`;
+  v.querySelectorAll("[data-cos]").forEach((b) => (b.onclick = () => updateDoc(doc(petsCol, p.id), { costume: b.dataset.cos }).catch(fail)));
+  mount3d(p);
   $("#qW").onclick = () => recordForm("weight");
   $("#qP").onclick = () => recordForm("photo");
   $("#qM").onclick = () => recordForm("memo");
@@ -373,19 +456,21 @@ function petForm(p) {
       <div><label class="btn ghost sm" style="margin-top:8px">写真を選ぶ<input type="file" id="pPhoto" accept="image/*" hidden></label></div></div>
     <label class="f">名前<input id="pName" value="${esc(p.name)}" maxlength="30" placeholder="例: もち"></label>
     <label class="f">種類<input id="pSpecies" value="${esc(p.species)}" maxlength="30"></label>
+    <label class="f">3Dの毛色(チンチラの場合)<select id="pCoat"><option value="gray">グレー</option><option value="white-pied">ホワイトパイド(白っぽい子)</option></select></label>
     <label class="f">誕生日(わかれば)<input id="pBirth" type="date" value="${esc(p.birthday)}"></label>
     <label class="f">お迎えした日(わかれば)<input id="pAdopt" type="date" value="${esc(p.adopted)}"></label>
     <label class="f">体重の単位<select id="pUnit"><option value="g">g(グラム)</option><option value="kg">kg(キログラム)</option></select></label>
     <button class="btn block" id="pSave">保存する</button>`,
     (b) => {
       $("#pUnit", b).value = p.unit || "g";
+      $("#pCoat", b).value = p.coat || "gray";
       const setAv = () => { $("#pAv", b).innerHTML = photo ? `<img class="av" src="${photo}" style="width:96px;height:96px;border-radius:50%" alt="">` : `<span class="av" style="width:96px;height:96px;border-radius:50%">${icon("paw")}</span>`; };
       setAv();
       $("#pPhoto", b).onchange = async (e) => { if (e.target.files[0]) { try { photo = await squareThumb(e.target.files[0], 240); setAv(); } catch (er) { toast(er.message); } } };
       $("#pSave", b).onclick = async () => {
         const name = $("#pName", b).value.trim();
         if (!name) { toast("名前を入力してください"); return; }
-        const obj = { ...strip(p), name, species: $("#pSpecies", b).value.trim(), birthday: $("#pBirth", b).value, adopted: $("#pAdopt", b).value, unit: $("#pUnit", b).value, photo };
+        const obj = { ...strip(p), name, species: $("#pSpecies", b).value.trim(), birthday: $("#pBirth", b).value, adopted: $("#pAdopt", b).value, unit: $("#pUnit", b).value, coat: $("#pCoat", b).value, photo };
         if (isNew) { const ref = doc(petsCol); obj.createdAt = Date.now(); curPet = ref.id; setDoc(ref, obj).catch(fail); }
         else updateDoc(doc(petsCol, p.id), obj).catch(fail);
         closeSheet(); toast("保存しました");

@@ -107,3 +107,14 @@ label.chk input{width:20px;height:20px;accent-color:var(--green)}
 #tabs button.on{color:var(--green-d)}
 #tabs svg{width:25px;height:25px}
 #tabs[hidden]{display:none}
+
+.v3dcard{padding:10px 10px 14px}
+.v3dhost{width:100%}
+.v3d{width:100%;height:300px;touch-action:pan-y;cursor:grab;background:radial-gradient(ellipse at 50% 85%,#efe4cc 0,rgba(239,228,204,0) 62%)}
+.v3d canvas{width:100%;height:100%;display:block}
+.banner{background:#fbe9b7;color:#7a5a12;border-radius:12px;padding:8px 12px;font-weight:700;text-align:center;margin-bottom:8px}
+.costumes{display:flex;flex-wrap:wrap;gap:6px}
+.cchip{border:1.5px solid var(--line);background:var(--card);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:600;display:flex;flex-direction:column;align-items:center;line-height:1.2}
+.cchip small{font-size:10px;color:var(--sub);font-weight:500}
+.cchip.on{border-color:var(--green);background:#eef4e4;color:var(--green-d)}
+.cchip:disabled{opacity:.55;cursor:default}

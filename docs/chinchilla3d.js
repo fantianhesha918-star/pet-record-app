@@ -82,14 +82,11 @@ export function createViewer() {
   el.addEventListener("pointerup", up);
   el.addEventListener("pointercancel", up);
 
-  const clock = new THREE.Clock();
   function tick() {
     requestAnimationFrame(tick);
     if (!el.isConnected || document.visibilityState === "hidden" || !model) return;
-    const t = clock.getElapsedTime();
     if (!dragging && performance.now() - lastTouch > 2500) userAngle *= 0.96; // 放置すると正面へ戻る
-    const sway = Math.sin(t * 0.8) * 0.35;
-    pivot.rotation.y = (el.dataset.front ? Number(el.dataset.front) : 0) + sway + userAngle;
+    pivot.rotation.y = (el.dataset.front ? Number(el.dataset.front) : 0) + userAngle;
     if (bounce > 0) { bounce = Math.max(0, bounce - 0.035); pivot.position.y = Math.sin(bounce * Math.PI) * fit.r * 0.25; } else pivot.position.y = 0;
     model.scale.set(widthScale, 1, widthScale);
     renderer.render(scene, camera);
